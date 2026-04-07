@@ -41,9 +41,35 @@ Zero external dependencies. Loads automatically on next session.
 
 Press `Enter` on any provider to see its full configuration:
 
-- Enabled status, source file, `baseUrl`, `api`
-- All models with resolved parameters: `contextWindow`, `maxTokens`, `reasoning`, `input`, `cost`
-- Each parameter is tagged `[user]` (explicitly set in your config) or `[provider]` (auto-filled from models.dev, showing which provider the data came from)
+```
+──────────────────────────────────────────────────────────────────
+ claude-corp ✓ enabled
+  source: corporate.json · remote
+  baseUrl: https://proxy.corp.com/v1
+  api: anthropic-messages
+──────────────────────────────────────────────────────────────────
+  [1] claude-sonnet-4-5-20250929
+  name            Claude Sonnet 4.5            [anthropic]
+  context         200,000                      [anthropic]
+  maxTokens       16,384                       [anthropic]
+  reasoning       no                           [anthropic]
+  input           text, image                  [anthropic]
+  cost/1M         in:$3  out:$15  cR:$0.3  cW:$3.75   [anthropic]
+
+  [2] claude-opus-4-5
+  name            Claude Opus 4.5              [anthropic]
+  context         200,000                      [user]
+  maxTokens       32,000                       [user]
+  reasoning       yes                          [anthropic]
+  input           text, image                  [anthropic]
+  cost/1M         in:$5  out:$25               [user]
+──────────────────────────────────────────────────────────────────
+  [user] source  [anthropic] models.dev
+  esc/q back  ·  ↑↓ scroll
+```
+
+- `[user]` — value explicitly set in your source file
+- `[provider]` — auto-filled from models.dev (shows which provider the data came from)
 - `↑/↓` or `j/k` to scroll, `Esc` / `q` / `Backspace` to return to list
 
 ## Source Files

@@ -1,6 +1,6 @@
 {
   "name": "pi-model-hub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Manage LLM model providers from multiple local files and remote URLs in pi-coding-agent",
   "type": "module",
   "main": "./src/index.ts",
@@ -28,7 +28,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/badlogic/pi-model-hub.git"
+    "url": "https://github.com/keambar/pi-model-hub.git"
   },
   "license": "MIT"
 }
