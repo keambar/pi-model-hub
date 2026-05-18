@@ -22,9 +22,9 @@ import type {
 	ProviderConfig,
 	ProviderModelConfig,
 	Theme,
-} from "@mariozechner/pi-coding-agent";
-import type { Component, Focusable, TUI } from "@mariozechner/pi-tui";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -647,6 +647,7 @@ export default function (pi: ExtensionAPI) {
 					overlayOptions: {
 						anchor: "bottom-left",
 						width: "100%",
+						maxHeight: "80%",
 						margin: { bottom: 1 },
 					},
 				},
@@ -672,6 +673,7 @@ class HubPanel implements Component, Focusable {
 	focused = false;
 
 	private selected = 0;
+	private listScroll = 0;
 	private syncing = false;
 	private statusText: string | undefined;
 	private statusSeverity: "info" | "warning" = "info";
@@ -704,9 +706,11 @@ class HubPanel implements Component, Focusable {
 	private clampSelection(): void {
 		if (this.rows.length === 0) {
 			this.selected = 0;
+			this.listScroll = 0;
 		} else if (this.selected >= this.rows.length) {
 			this.selected = this.rows.length - 1;
 		}
+		this.listScroll = Math.max(0, Math.min(this.listScroll, Math.max(0, this.rows.length - 1)));
 	}
 
 	private refreshState(): void {
@@ -845,10 +849,24 @@ class HubPanel implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
-		if (this.detailProvider) {
-			return this.renderDetail(width);
-		}
-		return this.renderList(width);
+		const lines = this.detailProvider ? this.renderDetail(width) : this.renderList(width);
+		return lines.map((line) => truncateToWidth(line, width));
+	}
+
+	private overlayRowBudget(): number {
+		const termRows = this.tui.terminal?.rows ?? process.stdout.rows ?? 24;
+		return Math.max(8, Math.floor(termRows * 0.8));
+	}
+
+	private visibleListRows(): number {
+		const fixedRows = 6;
+		return Math.max(1, Math.min(this.rows.length, this.overlayRowBudget() - fixedRows));
+	}
+
+	private clampListScroll(visibleRows: number): void {
+		if (this.selected < this.listScroll) this.listScroll = this.selected;
+		if (this.selected >= this.listScroll + visibleRows) this.listScroll = this.selected - visibleRows + 1;
+		this.listScroll = Math.max(0, Math.min(this.listScroll, Math.max(0, this.rows.length - visibleRows)));
 	}
 
 	private renderDetail(width: number): string[] {
@@ -922,14 +940,11 @@ class HubPanel implements Component, Focusable {
 		lines.push(th.fg("dim", " ") + userTag + th.fg("dim", " source  ") + th.fg("warning", "[provider]") + th.fg("dim", " models.dev"));
 		lines.push(th.fg("dim", " esc/q back  ·  ↑↓ scroll"));
 
-		// Apply scroll
-		if (this.detailScroll > 0) {
-			const maxScroll = Math.max(0, lines.length - 10);
-			this.detailScroll = Math.min(this.detailScroll, maxScroll);
-			return lines.slice(this.detailScroll);
-		}
-
-		return lines;
+		// Apply scroll based on the overlay height budget.
+		const viewportRows = this.overlayRowBudget();
+		const maxScroll = Math.max(0, lines.length - viewportRows);
+		this.detailScroll = Math.max(0, Math.min(this.detailScroll, maxScroll));
+		return lines.slice(this.detailScroll, this.detailScroll + viewportRows);
 	}
 
 	private renderList(width: number): string[] {
@@ -963,8 +978,15 @@ class HubPanel implements Component, Focusable {
 		const fixedW = 3 + 4 + 2 + modelW + 2 + srcW + 2; // cursor+check+gaps+models+gap+source+remote
 		const nameW = Math.max(12, width - fixedW);
 
-		for (let i = 0; i < this.rows.length; i++) {
-			const row = this.rows[i]!;
+		const visibleRows = this.visibleListRows();
+		this.clampListScroll(visibleRows);
+		if (this.listScroll > 0) {
+			lines.push(th.fg("dim", `   … ${this.listScroll} previous`));
+		}
+		const visible = this.rows.slice(this.listScroll, this.listScroll + visibleRows);
+		for (let visibleIndex = 0; visibleIndex < visible.length; visibleIndex++) {
+			const i = this.listScroll + visibleIndex;
+			const row = visible[visibleIndex]!;
 			const sel = i === this.selected;
 
 			const cursor = sel ? th.fg("accent", "▸") : " ";
@@ -980,6 +1002,11 @@ class HubPanel implements Component, Focusable {
 				: " ";
 
 			lines.push(` ${cursor} [${check}] ${name}  ${models}  ${src}${remote}`);
+		}
+
+		const remaining = this.rows.length - (this.listScroll + visibleRows);
+		if (remaining > 0) {
+			lines.push(th.fg("dim", `   … ${remaining} more`));
 		}
 
 		// Separator
