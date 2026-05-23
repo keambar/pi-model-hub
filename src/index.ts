@@ -110,6 +110,7 @@ interface SourceModelConfig {
 	maxTokens?: number;
 	headers?: Record<string, string>;
 	compat?: Record<string, unknown>;
+	thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
 }
 
 /** Tracked state per provider for toggle support */
@@ -290,8 +291,10 @@ function toProviderModelConfig(
 	model: SourceModelConfig,
 	providerApi?: string,
 	lookup?: ModelLookup,
+	providerCompat?: Record<string, unknown>,
 ): ProviderModelConfig {
 	const ref = lookup?.get(model.id);
+	const compat = providerCompat || model.compat ? { ...providerCompat, ...model.compat } : undefined;
 	return {
 		id: model.id,
 		name: model.name ?? ref?.name ?? model.id,
@@ -302,12 +305,13 @@ function toProviderModelConfig(
 		contextWindow: model.contextWindow ?? ref?.contextWindow ?? 128000,
 		maxTokens: model.maxTokens ?? ref?.maxTokens ?? 16384,
 		headers: model.headers,
-		compat: model.compat as ProviderModelConfig["compat"],
+		compat: compat as ProviderModelConfig["compat"],
+		thinkingLevelMap: model.thinkingLevelMap,
 	};
 }
 
 function toProviderConfig(source: SourceProviderConfig, lookup?: ModelLookup): ProviderConfig {
-	const models = source.models?.map((m) => toProviderModelConfig(m, source.api, lookup));
+	const models = source.models?.map((m) => toProviderModelConfig(m, source.api, lookup, source.compat));
 	return {
 		baseUrl: source.baseUrl,
 		apiKey: source.apiKey,

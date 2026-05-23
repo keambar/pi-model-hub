@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-05-24
+
+### Fixed
+- Preserve model `thinkingLevelMap` when loading source providers, enabling model-specific thinking levels such as `xhigh`.
+- Merge provider-level `compat` into each generated model `compat` instead of emitting unsupported provider-level `compat`.
+
 ## [0.1.0] — 2026-04-06
 
 ### Added

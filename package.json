@@ -1,6 +1,6 @@
 {
   "name": "pi-model-hub",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Manage LLM model providers from multiple local files and remote URLs in pi-coding-agent",
   "type": "module",
   "main": "./src/index.ts",
