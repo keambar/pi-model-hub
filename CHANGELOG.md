@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+- Resolve models.dev metadata for gateway-prefixed or aliased model IDs while preserving the API-facing model ID.
+- Add per-model `modelsDevId` and `modelsDevProvider` fields for explicit catalog/provider selection.
+
+### Changed
+- Keep models.dev provider alternatives in the resolver instead of collapsing duplicate IDs, with `zhipuai` prioritized ahead of coding/free-plan providers by default.
+- `/hub` detail view shows models.dev provider, catalog ID, match strategy, and `[default]` for unresolved fallback values.
+- Explicit sync now awaits the models.dev refresh before reloading sources.
+
 ## [0.1.2] — 2026-05-24
 
 ### Fixed
