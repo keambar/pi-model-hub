@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-06-18
+
 ### Added
 - Resolve models.dev metadata for gateway-prefixed or aliased model IDs while preserving the API-facing model ID.
 - Add per-model `modelsDevId` and `modelsDevProvider` fields for explicit catalog/provider selection.
