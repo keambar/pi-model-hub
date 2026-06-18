@@ -49,27 +49,27 @@ Press `Enter` on any provider to see its full configuration:
   api: anthropic-messages
 ──────────────────────────────────────────────────────────────────
   [1] claude-sonnet-4-5-20250929
-  name            Claude Sonnet 4.5            [anthropic]
-  context         200,000                      [anthropic]
-  maxTokens       16,384                       [anthropic]
-  reasoning       no                           [anthropic]
-  input           text, image                  [anthropic]
-  cost/1M         in:$3  out:$15  cR:$0.3  cW:$3.75   [anthropic]
+  name            Claude Sonnet 4.5            [anthropic:claude-sonnet-4-5-20250929 via id]
+  context         200,000                      [anthropic:claude-sonnet-4-5-20250929 via id]
+  maxTokens       16,384                       [anthropic:claude-sonnet-4-5-20250929 via id]
+  reasoning       no                           [anthropic:claude-sonnet-4-5-20250929 via id]
+  input           text, image                  [anthropic:claude-sonnet-4-5-20250929 via id]
+  cost/1M         in:$3  out:$15  cR:$0.3  cW:$3.75   [anthropic:claude-sonnet-4-5-20250929 via id]
 
   [2] claude-opus-4-5
-  name            Claude Opus 4.5              [anthropic]
+  name            Claude Opus 4.5              [anthropic:claude-opus-4-5 via id]
   context         200,000                      [user]
   maxTokens       32,000                       [user]
-  reasoning       yes                          [anthropic]
-  input           text, image                  [anthropic]
+  reasoning       yes                          [anthropic:claude-opus-4-5 via id]
+  input           text, image                  [anthropic:claude-opus-4-5 via id]
   cost/1M         in:$5  out:$25               [user]
 ──────────────────────────────────────────────────────────────────
-  [user] source  [anthropic] models.dev
+  [user] source  [provider:id via match] models.dev
   esc/q back  ·  ↑↓ scroll
 ```
 
 - `[user]` — value explicitly set in your source file
-- `[provider]` — auto-filled from models.dev (shows which provider the data came from)
+- `[provider:id via match]` — auto-filled from models.dev (shows provider, catalog ID, and match strategy)
 - `↑/↓` or `j/k` to scroll, `Esc` / `q` / `Backspace` to return to list
 
 ## Source Files
@@ -106,6 +106,8 @@ One file = one or more providers. Files are loaded in alphabetical order. A prov
 | `headers` | no | Extra HTTP headers |
 | `authHeader` | no | Use `Authorization: Bearer` header instead of default |
 | `models[].id` | yes | Model ID as used by the API |
+| `models[].modelsDevId` | no | Canonical models.dev model ID to use when the API ID is an alias or gateway-prefixed ID |
+| `models[].modelsDevProvider` | no | models.dev provider to use when several providers publish the same model ID; requires `modelsDevId` |
 | `models[].name` | no | Display name (auto-filled from models.dev) |
 | `models[].contextWindow` | no | Max context tokens (auto-filled) |
 | `models[].maxTokens` | no | Max output tokens (auto-filled) |
@@ -145,16 +147,28 @@ The following files in `~/.pi/agent/sources/` are reserved and never loaded as p
 
 On session start, the extension fetches and caches model data from [models.dev](https://models.dev) (`~/.pi/agent/sources/_models-dev-cache.json`, TTL 24h). When loading a source file, any model with missing parameters is enriched from this cache.
 
+Model IDs sent to your API are preserved. For API gateways that prefix or alias model IDs, the resolver tries, in order: explicit `modelsDevProvider` + `modelsDevId`, explicit `modelsDevId`, exact `id`, exact `name`, gateway suffix after `--`, then a conservative normalized alias such as `DeepSeek V4 Flash` ↔ `deepseek-v4-flash` when it is unambiguous.
+
 When the same model ID appears in multiple providers in models.dev (e.g. `claude-sonnet-4-5-20250929` is listed under `anthropic`, `302ai`, `helicone`, etc.), the data from the highest-priority provider is used.
 
 **Default priority:**
 
 ```
-anthropic → openai → google → deepseek → moonshotai → zai →
+anthropic → openai → google → deepseek → moonshotai → zhipuai → zai →
 minimax → xai → meta → openrouter → (rest)
 ```
 
-Override in `_config.json`:
+Use per-model overrides when priority alone is not enough. For example, GLM-5.2 is published by both API-price and coding/free-plan providers; this keeps the gateway API ID while selecting ZhipuAI API pricing from models.dev:
+
+```jsonc
+{
+  "id": "llm-gateway--glm-5.2",
+  "modelsDevId": "glm-5.2",
+  "modelsDevProvider": "zhipuai"
+}
+```
+
+Override the global priority in `_config.json`:
 
 ```jsonc
 // ~/.pi/agent/sources/_config.json

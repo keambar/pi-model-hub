@@ -59,6 +59,8 @@ type ModelsDevData = Record<string, { models?: Record<string, ModelsDevModel> }>
 interface ModelDevParams {
 	/** Which models.dev provider this data came from */
 	provider: string;
+	/** The canonical models.dev model ID this data came from */
+	modelsDevId: string;
 	name?: string;
 	reasoning?: boolean;
 	input?: ("text" | "image")[];
@@ -67,8 +69,142 @@ interface ModelDevParams {
 	maxTokens?: number;
 }
 
-/** Lookup map: model ID → resolved parameters from models.dev */
-type ModelLookup = Map<string, ModelDevParams>;
+type MatchBy = "explicit" | "id" | "name" | "gateway-suffix" | "normalized";
+
+interface ModelDevMatch extends ModelDevParams {
+	matchedBy: MatchBy;
+}
+
+interface ResolutionResult {
+	match?: ModelDevMatch;
+	warning?: string;
+}
+
+interface ModelDevEntry {
+	id: string;
+	provider: string;
+	params: ModelDevParams;
+}
+
+/** Resolver that keeps provider alternatives from models.dev and chooses per model. */
+class ModelDevResolver {
+	private byId = new Map<string, ModelDevEntry[]>();
+	private byName = new Map<string, ModelDevEntry[]>();
+	private byNormalized = new Map<string, ModelDevEntry[]>();
+
+	constructor(data: ModelsDevData, private priority: string[]) {
+		for (const [providerId, providerData] of Object.entries(data)) {
+			if (!providerData?.models) continue;
+
+			for (const [, model] of Object.entries(providerData.models)) {
+				const id = model.id;
+				if (!id) continue;
+
+				const inputModalities = model.modalities?.input ?? [];
+				const input: ("text" | "image")[] = [];
+				if (inputModalities.includes("text")) input.push("text");
+				if (inputModalities.includes("image") || model.attachment) input.push("image");
+				if (input.length === 0) input.push("text");
+
+				const params: ModelDevParams = { provider: providerId, modelsDevId: id, name: model.name, reasoning: model.reasoning, input };
+				if (model.limit?.context) params.contextWindow = model.limit.context;
+				if (model.limit?.output) params.maxTokens = model.limit.output;
+				if (model.cost) {
+					params.cost = {
+						input: model.cost.input ?? 0,
+						output: model.cost.output ?? 0,
+						cacheRead: model.cost.cache_read ?? 0,
+						cacheWrite: model.cost.cache_write ?? 0,
+					};
+				}
+
+				const entry: ModelDevEntry = { id, provider: providerId, params };
+				this.add(this.byId, id, entry);
+				if (model.name) this.add(this.byName, model.name, entry);
+				this.add(this.byNormalized, normalizeModelAlias(id), entry);
+				if (model.name) this.add(this.byNormalized, normalizeModelAlias(model.name), entry);
+			}
+		}
+	}
+
+	resolve(model: SourceModelConfig): ResolutionResult {
+		if (model.modelsDevProvider && model.modelsDevId) {
+			return this.resolveEntries(model.modelsDevId, "explicit", this.byId.get(model.modelsDevId), model.modelsDevProvider);
+		}
+		if (model.modelsDevId) {
+			return this.resolveEntries(model.modelsDevId, "explicit", this.byId.get(model.modelsDevId)) ?? { warning: `${model.modelsDevId}: models.dev id not found` };
+		}
+
+		return (
+			this.resolveEntries(model.id, "id", this.byId.get(model.id)) ??
+			(model.name ? this.resolveEntries(model.name, "name", this.byName.get(model.name)) : undefined) ??
+			this.resolveGatewaySuffix(model.id) ??
+			this.resolveNormalized(model.name ?? model.id)
+		) ?? {};
+	}
+
+	private resolveGatewaySuffix(id: string): ResolutionResult | undefined {
+		const idx = id.lastIndexOf("--");
+		if (idx < 0 || idx + 2 >= id.length) return undefined;
+		const suffix = id.slice(idx + 2);
+		return this.resolveEntries(suffix, "gateway-suffix", this.byId.get(suffix));
+	}
+
+	private resolveNormalized(value: string): ResolutionResult | undefined {
+		const normalized = normalizeModelAlias(value);
+		if (!normalized) return undefined;
+		const entries = this.byNormalized.get(normalized);
+		if (!entries || entries.length === 0) return undefined;
+		const ids = new Set(entries.map((entry) => entry.id));
+		if (ids.size > 1) {
+			return { warning: `${value}: ambiguous normalized models.dev match (${Array.from(ids).sort().join(", ")})` };
+		}
+		return this.resolveEntries(value, "normalized", entries);
+	}
+
+	private resolveEntries(
+		label: string,
+		matchedBy: MatchBy,
+		entries: ModelDevEntry[] | undefined,
+		providerHint?: string,
+	): ResolutionResult | undefined {
+		if (!entries || entries.length === 0) {
+			return providerHint ? { warning: `${label}: models.dev provider ${providerHint} not found` } : undefined;
+		}
+
+		let candidates = entries;
+		if (providerHint) {
+			candidates = entries.filter((entry) => entry.provider === providerHint);
+			if (candidates.length === 0) return { warning: `${label}: models.dev provider ${providerHint} not found` };
+		}
+
+		const selected = this.chooseByPriority(candidates);
+		return { match: { ...selected.params, matchedBy } };
+	}
+
+	private chooseByPriority(entries: ModelDevEntry[]): ModelDevEntry {
+		return [...entries].sort((a, b) => this.providerRank(a.provider) - this.providerRank(b.provider) || a.provider.localeCompare(b.provider))[0]!;
+	}
+
+	private providerRank(provider: string): number {
+		const idx = this.priority.indexOf(provider);
+		return idx >= 0 ? idx : this.priority.length;
+	}
+
+	private add(map: Map<string, ModelDevEntry[]>, key: string, entry: ModelDevEntry): void {
+		if (!key) return;
+		const list = map.get(key);
+		if (list) list.push(entry);
+		else map.set(key, [entry]);
+	}
+}
+
+function normalizeModelAlias(value: string): string {
+	return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** models.dev resolver used during provider enrichment and detail rendering. */
+type ModelLookup = ModelDevResolver;
 
 /** Remote source declaration in _remote.json */
 interface RemoteSource {
@@ -108,6 +244,10 @@ interface SourceModelConfig {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow?: number;
 	maxTokens?: number;
+	/** Canonical models.dev model ID when API-facing id is an alias. */
+	modelsDevId?: string;
+	/** models.dev provider to use when multiple providers publish the same model ID. */
+	modelsDevProvider?: string;
 	headers?: Record<string, string>;
 	compat?: Record<string, unknown>;
 	thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
@@ -157,6 +297,7 @@ const DEFAULT_MODEL_SOURCE_PRIORITY = [
 	"google",
 	"deepseek",
 	"moonshotai",
+	"zhipuai",
 	"zai",
 	"minimax",
 	"xai",
@@ -217,51 +358,9 @@ function listSourceFiles(): string[] {
 		.sort();
 }
 
-/**
- * Build a model lookup map from models.dev cache data.
- * Models from providers earlier in the priority list win over later entries.
- */
+/** Build a models.dev resolver from cache data. */
 function buildModelLookup(data: ModelsDevData, priority: string[]): ModelLookup {
-	const lookup = new Map<string, ModelDevParams>();
-
-	const providerIds = Object.keys(data);
-	// Process in order: non-priority first, then priority in reverse (lowest first)
-	// so the highest-priority provider is the last writer and wins.
-	const ordered = [
-		...providerIds.filter((p) => !priority.includes(p)),
-		...priority.filter((p) => providerIds.includes(p)).reverse(),
-	];
-
-	for (const providerId of ordered) {
-		const providerData = data[providerId];
-		if (!providerData?.models) continue;
-
-		for (const [, model] of Object.entries(providerData.models)) {
-			const id = model.id;
-			if (!id) continue;
-
-			const inputModalities = model.modalities?.input ?? [];
-			const input: ("text" | "image")[] = [];
-			if (inputModalities.includes("text")) input.push("text");
-			if (inputModalities.includes("image") || model.attachment) input.push("image");
-			if (input.length === 0) input.push("text");
-
-			const params: ModelDevParams = { provider: providerId, name: model.name, reasoning: model.reasoning, input };
-			if (model.limit?.context) params.contextWindow = model.limit.context;
-			if (model.limit?.output) params.maxTokens = model.limit.output;
-			if (model.cost) {
-				params.cost = {
-					input: model.cost.input ?? 0,
-					output: model.cost.output ?? 0,
-					cacheRead: model.cost.cache_read ?? 0,
-					cacheWrite: model.cost.cache_write ?? 0,
-				};
-			}
-			lookup.set(id, params);
-		}
-	}
-
-	return lookup;
+	return new ModelDevResolver(data, priority);
 }
 
 /** Read models.dev cache from disk. Returns null if missing or corrupt. */
@@ -293,7 +392,7 @@ function toProviderModelConfig(
 	lookup?: ModelLookup,
 	providerCompat?: Record<string, unknown>,
 ): ProviderModelConfig {
-	const ref = lookup?.get(model.id);
+	const ref = lookup?.resolve(model)?.match;
 	const compat = providerCompat || model.compat ? { ...providerCompat, ...model.compat } : undefined;
 	return {
 		id: model.id,
@@ -356,11 +455,10 @@ export default function (pi: ExtensionAPI) {
 
 	// Build model lookup from models.dev cache (lazy, rebuilt on reload/sync)
 	function buildLookup(): ModelLookup {
-		const cache = readModelsDevCache();
-		if (!cache) return new Map();
 		const config = readGlobalConfig();
 		const priority = config.modelSourcePriority ?? DEFAULT_MODEL_SOURCE_PRIORITY;
-		return buildModelLookup(cache, priority);
+		const cache = readModelsDevCache();
+		return buildModelLookup(cache ?? {}, priority);
 	}
 
 	let modelLookup: ModelLookup = buildLookup();
@@ -394,6 +492,11 @@ export default function (pi: ExtensionAPI) {
 
 			for (const [providerName, providerSource] of Object.entries(result.data.providers)) {
 				const config = toProviderConfig(providerSource, modelLookup);
+
+				for (const model of providerSource.models ?? []) {
+					const resolution = modelLookup.resolve(model);
+					if (resolution.warning) warnings.push(`${file}/${providerName}/${model.id}: ${resolution.warning}`);
+				}
 
 				if (!config.models || config.models.length === 0) {
 					warnings.push(`${file}/${providerName}: no models defined`);
@@ -444,10 +547,8 @@ export default function (pi: ExtensionAPI) {
 		let synced = 0;
 		const failed: string[] = [];
 
-		// Also refresh models.dev cache on explicit sync
-		void fetchAndCacheModelsDev().then((ok) => {
-			if (ok) modelLookup = buildLookup();
-		});
+		const modelsDevRefreshed = await fetchAndCacheModelsDev();
+		if (modelsDevRefreshed) modelLookup = buildLookup();
 
 		for (const [filename, source] of entries) {
 			const saveTo = path.join(SOURCES_DIR, filename);
@@ -644,7 +745,7 @@ export default function (pi: ExtensionAPI) {
 						() => reloadAll(),
 						(name: string) => providerStates.get(name)?.config,
 						(name: string) => providerStates.get(name)?.rawModels,
-						modelLookup,
+						(model: SourceModelConfig) => modelLookup.resolve(model),
 					),
 				{
 					overlay: true,
@@ -699,7 +800,7 @@ class HubPanel implements Component, Focusable {
 		private doReload: () => { loaded: number; errors: string[] },
 		private getProviderConfig: (name: string) => ProviderConfig | undefined,
 		private getRawModels: (name: string) => SourceModelConfig[] | undefined,
-		private modelLookupRef: ModelLookup,
+		private resolveModel: (model: SourceModelConfig) => ResolutionResult,
 	) {
 		this.rows = buildRows();
 		this.fileCount = listSourceFiles().length;
@@ -912,12 +1013,16 @@ class HubPanel implements Component, Focusable {
 			for (let i = 0; i < config.models.length; i++) {
 				const m = config.models[i]!;
 				const raw = rawModels.find((r) => r.id === m.id);
-				const ref = this.modelLookupRef.get(m.id);
-				const autoTag = th.fg("warning", ` [${ref?.provider ?? "auto"}]`);
+				const resolution = raw ? this.resolveModel(raw) : {};
+				const ref = resolution.match;
+				const autoTag = ref
+					? th.fg("warning", ` [${ref.provider}:${ref.modelsDevId} via ${ref.matchedBy}]`)
+					: th.fg("muted", " [default]");
+				const warningTag = resolution.warning ? th.fg("warning", ` [default: ${resolution.warning}]`) : autoTag;
 
 				const tag = (field: keyof SourceModelConfig): string => {
 					if (!raw) return "";
-					return raw[field] !== undefined ? userTag : autoTag;
+					return raw[field] !== undefined ? userTag : warningTag;
 				};
 
 				const idx = th.fg("dim", `  [${i + 1}] `);
@@ -941,7 +1046,15 @@ class HubPanel implements Component, Focusable {
 		}
 
 		lines.push(this.separator(width));
-		lines.push(th.fg("dim", " ") + userTag + th.fg("dim", " source  ") + th.fg("warning", "[provider]") + th.fg("dim", " models.dev"));
+		lines.push(
+			th.fg("dim", " ") +
+				userTag +
+				th.fg("dim", " source  ") +
+				th.fg("warning", "[provider:id via match]") +
+				th.fg("dim", " models.dev  ") +
+				th.fg("muted", "[default]") +
+				th.fg("dim", " fallback"),
+		);
 		lines.push(th.fg("dim", " esc/q back  ·  ↑↓ scroll"));
 
 		// Apply scroll based on the overlay height budget.
