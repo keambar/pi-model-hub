@@ -1,8 +1,8 @@
 # pi-model-hub
 
-Manage LLM model providers from multiple local JSON files and optional remote URLs for [pi-coding-agent](https://github.com/badlogic/pi-mono).
+Manage LLM model providers from multiple local JSON files and optional remote URLs for [pi-coding-agent](https://github.com/earendil-works/pi).
 
-Model parameters (context window, output limit, cost, input modalities) are auto-filled from [models.dev](https://models.dev) — no manual spec needed for common models.
+Model parameters (context window, output limit, cost, input modalities, thinking levels) are auto-filled from [models.dev](https://models.dev) — no manual spec needed for common models.
 
 ## Quick Start
 
@@ -62,6 +62,7 @@ Press `Enter` on any provider to see its full configuration:
   maxTokens       32,000                       [user]
   reasoning       yes                          [anthropic:claude-opus-4-5 via id]
   input           text, image                  [anthropic:claude-opus-4-5 via id]
+  thinking        off:—  minimal:—  low:low  medium:medium  high:high  xhigh:—  max:—  [models.dev reasoning_options]
   cost/1M         in:$5  out:$25               [user]
 ──────────────────────────────────────────────────────────────────
   [user] source  [provider:id via match] models.dev
@@ -70,6 +71,8 @@ Press `Enter` on any provider to see its full configuration:
 
 - `[user]` — value explicitly set in your source file
 - `[provider:id via match]` — auto-filled from models.dev (shows provider, catalog ID, and match strategy)
+- `[models.dev reasoning_options]` — thinking levels derived from the catalog's reasoning options
+- In the `thinking` row, `—` means the level is hidden in the model selector; a level missing from the row keeps pi's default handling
 - `↑/↓` or `j/k` to scroll, `Esc` / `q` / `Backspace` to return to list
 
 ## Source Files
@@ -114,18 +117,23 @@ One file = one or more providers. Files are loaded in alphabetical order. A prov
 | `models[].cost` | no | `{ input, output, cacheRead, cacheWrite }` per 1M tokens (auto-filled) |
 | `models[].reasoning` | no | Whether model supports extended reasoning (auto-filled) |
 | `models[].input` | no | `["text"]` or `["text", "image"]` (auto-filled) |
+| `models[].thinkingLevelMap` | no | pi thinking level → API effort value, `null` to hide the level (auto-filled; see below) |
+| `models[].headers` | no | Extra HTTP headers for this model |
+| `models[].compat` | no | Compatibility overrides, merged over the provider-level `compat` |
 
 `apiKey` follows the same resolution logic as pi's `models.json`: if the value matches an environment variable name, that variable's value is used; otherwise it is treated as a literal string.
 
 ## Reserved Files
 
-The following files in `~/.pi/agent/sources/` are reserved and never loaded as provider configs:
+Every `_`-prefixed `.json` file in `~/.pi/agent/sources/` is extension metadata and is never loaded as a provider config. Three names are used by the extension itself:
 
 | File | Purpose |
 |------|---------|
 | `_remote.json` | Remote URL sync configuration |
 | `_config.json` | Global extension settings |
 | `_models-dev-cache.json` | Auto-managed models.dev cache (do not edit) |
+
+Prefix any other metadata file with `_` to keep it out of provider loading. Files that do not end in `.json` (e.g. `disabled-provider.json.disable`) are ignored as well.
 
 ## Remote Sync
 
@@ -183,6 +191,31 @@ Override the global priority in `_config.json`:
 | `modelSourcePriority` | see above | Provider priority for model parameter lookup |
 | `modelsDevTtl` | `86400` | models.dev cache TTL in seconds |
 
+## Thinking Levels
+
+Models without an explicit `thinkingLevelMap` get one derived from the catalog's `reasoning_options`, so the model selector offers exactly the levels the provider documents:
+
+```jsonc
+// models.dev: [{ "type": "toggle" }, { "type": "effort", "values": ["low", "high", "max"] }]
+{ "minimal": null, "low": "low", "medium": null, "high": "high", "xhigh": "max", "max": "max" }
+```
+
+| Catalog input | Result |
+|---|---|
+| effort tier matching a pi level | mapped to itself (`"high": "high"`) |
+| pi level the catalog omits | `null` — hidden in the selector instead of sent verbatim to the API |
+| `xhigh` missing but `max` present | `"xhigh": "max"` |
+| `none` tier | `"off": "none"` |
+| `toggle` without a `none` tier | no `off` key — pi's own disable path is used |
+| neither `toggle` nor `none` | `"off": null` — thinking cannot be turned off |
+| `budget_tokens` only, or no effort tiers | no map — the model keeps legacy budget thinking |
+
+Exceptions:
+
+- An explicit `thinkingLevelMap` in a source file is used as-is. Partial maps are never merged with derived values — write every level you care about.
+- `google-generative-ai` and `google-vertex` models ignore derived maps: pi already resolves Gemini's own levels (including off and minimal), which the catalog does not list.
+- On `anthropic-messages` and `bedrock-converse-stream` a derived `"minimal": "minimal"` becomes `"minimal": "low"` — the Anthropic effort vocabulary has no minimal tier, and `"low"` is what pi sends there anyway.
+
 ## Team Configuration
 
 Point `_remote.json` at an internal URL to distribute provider configs across a team:
@@ -201,7 +234,7 @@ The hosted file uses the same `{ "providers": { ... } }` format. Infrastructure 
 
 ## How It Works
 
-1. **Startup**: scan `~/.pi/agent/sources/*.json` (excluding reserved files), register providers via `pi.registerProvider()`
+1. **Startup**: scan `~/.pi/agent/sources/*.json` (skipping `_`-prefixed metadata files), register providers via `pi.registerProvider()`
 2. **session_start**: background-refresh stale remote sources and models.dev cache (waits for idle session)
 3. **`/hub`**: overlay panel for toggle, sync, reload
 4. **Reload**: re-reads all source files and rebuilds the models.dev lookup

@@ -41,11 +41,29 @@ interface GlobalConfig {
 	modelsDevTtl?: number;
 }
 
+/** pi thinking levels, ordered from cheapest to most expensive. */
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
+
+/** Level → API effort value. `null` hides the level; a missing key keeps pi's default handling. */
+type ThinkingLevelMap = Partial<Record<ThinkingLevel, string | null>>;
+
+/** A reasoning control declared by models.dev: `toggle`, `effort` or `budget_tokens`. */
+interface ModelsDevReasoningOption {
+	type?: string;
+	/** Effort tiers, e.g. ["low", "high", "max"] */
+	values?: string[];
+	/** Lower bound for budget_tokens */
+	min?: number;
+}
+
 /** A single model entry from models.dev */
 interface ModelsDevModel {
 	id?: string;
 	name?: string;
 	reasoning?: boolean;
+	reasoning_options?: ModelsDevReasoningOption[];
 	attachment?: boolean;
 	limit?: { context?: number; output?: number };
 	cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
@@ -67,6 +85,8 @@ interface ModelDevParams {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow?: number;
 	maxTokens?: number;
+	/** Derived from models.dev `reasoning_options`; used when the source file sets no map. */
+	thinkingLevelMap?: ThinkingLevelMap;
 }
 
 type MatchBy = "explicit" | "id" | "name" | "gateway-suffix" | "normalized";
@@ -107,6 +127,10 @@ class ModelDevResolver {
 				if (input.length === 0) input.push("text");
 
 				const params: ModelDevParams = { provider: providerId, modelsDevId: id, name: model.name, reasoning: model.reasoning, input };
+				if (model.reasoning !== false) {
+					const thinkingLevelMap = deriveThinkingLevelMap(model.reasoning_options);
+					if (thinkingLevelMap) params.thinkingLevelMap = thinkingLevelMap;
+				}
 				if (model.limit?.context) params.contextWindow = model.limit.context;
 				if (model.limit?.output) params.maxTokens = model.limit.output;
 				if (model.cost) {
@@ -129,15 +153,15 @@ class ModelDevResolver {
 
 	resolve(model: SourceModelConfig): ResolutionResult {
 		if (model.modelsDevProvider && model.modelsDevId) {
-			return this.resolveEntries(model.modelsDevId, "explicit", this.byId.get(model.modelsDevId), model.modelsDevProvider);
+			return this.resolveProviderEntries(model.modelsDevId, this.byId.get(model.modelsDevId), model.modelsDevProvider);
 		}
 		if (model.modelsDevId) {
-			return this.resolveEntries(model.modelsDevId, "explicit", this.byId.get(model.modelsDevId)) ?? { warning: `${model.modelsDevId}: models.dev id not found` };
+			return this.resolveEntries("explicit", this.byId.get(model.modelsDevId)) ?? { warning: `${model.modelsDevId}: models.dev id not found` };
 		}
 
 		return (
-			this.resolveEntries(model.id, "id", this.byId.get(model.id)) ??
-			(model.name ? this.resolveEntries(model.name, "name", this.byName.get(model.name)) : undefined) ??
+			this.resolveEntries("id", this.byId.get(model.id)) ??
+			(model.name ? this.resolveEntries("name", this.byName.get(model.name)) : undefined) ??
 			this.resolveGatewaySuffix(model.id) ??
 			this.resolveNormalized(model.name ?? model.id)
 		) ?? {};
@@ -147,7 +171,7 @@ class ModelDevResolver {
 		const idx = id.lastIndexOf("--");
 		if (idx < 0 || idx + 2 >= id.length) return undefined;
 		const suffix = id.slice(idx + 2);
-		return this.resolveEntries(suffix, "gateway-suffix", this.byId.get(suffix));
+		return this.resolveEntries("gateway-suffix", this.byId.get(suffix));
 	}
 
 	private resolveNormalized(value: string): ResolutionResult | undefined {
@@ -159,27 +183,20 @@ class ModelDevResolver {
 		if (ids.size > 1) {
 			return { warning: `${value}: ambiguous normalized models.dev match (${Array.from(ids).sort().join(", ")})` };
 		}
-		return this.resolveEntries(value, "normalized", entries);
+		return this.resolveEntries("normalized", entries);
 	}
 
-	private resolveEntries(
-		label: string,
-		matchedBy: MatchBy,
-		entries: ModelDevEntry[] | undefined,
-		providerHint?: string,
-	): ResolutionResult | undefined {
-		if (!entries || entries.length === 0) {
-			return providerHint ? { warning: `${label}: models.dev provider ${providerHint} not found` } : undefined;
-		}
+	/** Pick the highest-priority entry, or nothing when the catalog has no match. */
+	private resolveEntries(matchedBy: MatchBy, entries: ModelDevEntry[] | undefined): ResolutionResult | undefined {
+		if (!entries || entries.length === 0) return undefined;
+		return { match: { ...this.chooseByPriority(entries).params, matchedBy } };
+	}
 
-		let candidates = entries;
-		if (providerHint) {
-			candidates = entries.filter((entry) => entry.provider === providerHint);
-			if (candidates.length === 0) return { warning: `${label}: models.dev provider ${providerHint} not found` };
-		}
-
-		const selected = this.chooseByPriority(candidates);
-		return { match: { ...selected.params, matchedBy } };
+	/** Explicit `modelsDevProvider`: the provider either has the model or the source file is wrong. */
+	private resolveProviderEntries(label: string, entries: ModelDevEntry[] | undefined, provider: string): ResolutionResult {
+		const candidates = entries?.filter((entry) => entry.provider === provider) ?? [];
+		if (candidates.length === 0) return { warning: `${label}: models.dev provider ${provider} not found` };
+		return { match: { ...this.chooseByPriority(candidates).params, matchedBy: "explicit" } };
 	}
 
 	private chooseByPriority(entries: ModelDevEntry[]): ModelDevEntry {
@@ -201,6 +218,69 @@ class ModelDevResolver {
 
 function normalizeModelAlias(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Derive a pi `thinkingLevelMap` from models.dev `reasoning_options`.
+ *
+ * Only an `effort` option produces a map: `budget_tokens` models use legacy budget thinking
+ * where an effort map is meaningless, and a bare `toggle` declares no tiers. Every level is
+ * emitted explicitly so unsupported levels are hidden in the UI instead of being forwarded
+ * verbatim to APIs that reject them.
+ */
+export function deriveThinkingLevelMap(reasoningOptions?: ModelsDevReasoningOption[]): ThinkingLevelMap | undefined {
+	if (!Array.isArray(reasoningOptions) || reasoningOptions.length === 0) return undefined;
+
+	const effort = reasoningOptions.find((o) => o?.type === "effort" && Array.isArray(o.values) && o.values.length > 0);
+	if (!effort) return undefined;
+
+	const values = new Set(effort.values);
+	const map: ThinkingLevelMap = {};
+
+	// off: an explicit "none" tier is sent as the effort value; a toggle means pi's default
+	// disable path already works, so the key stays absent. Otherwise thinking cannot be turned off.
+	if (values.has("none")) map.off = "none";
+	else if (!reasoningOptions.some((o) => o?.type === "toggle")) map.off = null;
+
+	for (const level of ["minimal", "low", "medium", "high"] as const) {
+		map[level] = values.has(level) ? level : null;
+	}
+	// Most catalogs stop at "max"; promote pi's xhigh to it rather than dropping the level.
+	map.xhigh = values.has("xhigh") ? "xhigh" : values.has("max") ? "max" : null;
+	map.max = values.has("max") ? "max" : null;
+
+	return map;
+}
+
+/** Detail-view thinking row: the rendered levels plus where the map came from. */
+export function describeThinkingLevels(
+	raw: SourceModelConfig | undefined,
+	map: ThinkingLevelMap | undefined,
+): { text: string; source: "user" | "models.dev" } | undefined {
+	if (!raw || !map || Object.keys(map).length === 0) return undefined;
+	const text = THINKING_LEVELS.filter((level) => level in map)
+		.map((level) => `${level}:${map[level] ?? "—"}`)
+		.join("  ");
+	return { text, source: raw.thinkingLevelMap !== undefined ? "user" : "models.dev" };
+}
+
+/**
+ * Adapt a derived map to what the target API can express.
+ *
+ * Google APIs resolve pi's levels themselves — off falls back to the lowest hidden level and
+ * minimal maps to Gemini's MINIMAL tier — while models.dev only lists low/medium/high for them,
+ * so adopting that map would hide working levels without unlocking any new one.
+ *
+ * Anthropic-style efforts have no minimal tier; pi sends "low" for it, and forwarding the
+ * catalog's own "minimal" would be rejected by the API.
+ */
+function adoptDerivedThinkingLevels(map: ThinkingLevelMap | undefined, api?: string): ThinkingLevelMap | undefined {
+	if (!map) return undefined;
+	if (api === "google-generative-ai" || api === "google-vertex") return undefined;
+	if ((api === "anthropic-messages" || api === "bedrock-converse-stream") && map.minimal === "minimal") {
+		return { ...map, minimal: "low" };
+	}
+	return map;
 }
 
 /** models.dev resolver used during provider enrichment and detail rendering. */
@@ -250,7 +330,7 @@ interface SourceModelConfig {
 	modelsDevProvider?: string;
 	headers?: Record<string, string>;
 	compat?: Record<string, unknown>;
-	thinkingLevelMap?: Partial<Record<"off" | "minimal" | "low" | "medium" | "high" | "xhigh", string | null>>;
+	thinkingLevelMap?: ThinkingLevelMap;
 }
 
 /** Tracked state per provider for toggle support */
@@ -348,13 +428,12 @@ function readGlobalConfig(): GlobalConfig {
 	return result.data ?? {};
 }
 
-const RESERVED_FILES = new Set([REMOTE_CONFIG_FILE, CONFIG_FILE, MODELS_DEV_CACHE_FILE]);
-
-function listSourceFiles(): string[] {
+/** Provider sources are `*.json`; `_`-prefixed files are extension metadata. */
+export function listSourceFiles(): string[] {
 	if (!fs.existsSync(SOURCES_DIR)) return [];
 	return fs
 		.readdirSync(SOURCES_DIR)
-		.filter((f) => f.endsWith(".json") && !RESERVED_FILES.has(f))
+		.filter((f) => f.endsWith(".json") && !f.startsWith("_"))
 		.sort();
 }
 
@@ -394,10 +473,11 @@ function toProviderModelConfig(
 ): ProviderModelConfig {
 	const ref = lookup?.resolve(model)?.match;
 	const compat = providerCompat || model.compat ? { ...providerCompat, ...model.compat } : undefined;
+	const api = model.api ?? providerApi;
 	return {
 		id: model.id,
 		name: model.name ?? ref?.name ?? model.id,
-		api: (model.api ?? providerApi) as ProviderModelConfig["api"],
+		api: api as ProviderModelConfig["api"],
 		reasoning: model.reasoning ?? ref?.reasoning ?? false,
 		input: model.input ?? ref?.input ?? ["text"],
 		cost: model.cost ?? ref?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -405,7 +485,7 @@ function toProviderModelConfig(
 		maxTokens: model.maxTokens ?? ref?.maxTokens ?? 16384,
 		headers: model.headers,
 		compat: compat as ProviderModelConfig["compat"],
-		thinkingLevelMap: model.thinkingLevelMap,
+		thinkingLevelMap: model.thinkingLevelMap ?? adoptDerivedThinkingLevels(ref?.thinkingLevelMap, api),
 	};
 }
 
@@ -701,15 +781,14 @@ export default function (pi: ExtensionAPI) {
 				const remotes = readRemoteConfig();
 				const rows: HubProviderRow[] = [];
 				for (const [name, state] of providerStates) {
+					const remote = remotes[state.sourceFile];
 					rows.push({
 						name,
 						enabled: state.enabled,
 						modelCount: state.config.models?.length ?? 0,
 						sourceFile: state.sourceFile,
-						isRemote: !!remotes[state.sourceFile],
-						isStale: remotes[state.sourceFile]
-							? isStale(path.join(SOURCES_DIR, state.sourceFile), remotes[state.sourceFile].ttl ?? 3600)
-							: false,
+						isRemote: !!remote,
+						isStale: remote ? isStale(path.join(SOURCES_DIR, state.sourceFile), remote.ttl ?? 3600) : false,
 					});
 				}
 				return rows;
@@ -887,7 +966,7 @@ class HubPanel implements Component, Focusable {
 			return;
 		}
 
-		if (matchesKey(data, " ")) {
+		if (matchesKey(data, Key.space)) {
 			const row = this.rows[this.selected];
 			if (row) {
 				this.toggleProvider(row.name);
@@ -1034,6 +1113,12 @@ class HubPanel implements Component, Focusable {
 				lines.push(th.fg("dim", `  ${this.pad("maxTokens", labelW)}`) + th.fg("text", `${(m.maxTokens ?? 0).toLocaleString()}`) + tag("maxTokens"));
 				lines.push(th.fg("dim", `  ${this.pad("reasoning", labelW)}`) + th.fg("text", m.reasoning ? "yes" : "no") + tag("reasoning"));
 				lines.push(th.fg("dim", `  ${this.pad("input", labelW)}`) + th.fg("text", (m.input ?? ["text"]).join(", ")) + tag("input"));
+				const thinking = describeThinkingLevels(raw, m.thinkingLevelMap);
+				if (thinking) {
+					const thinkingTag =
+						thinking.source === "user" ? userTag : th.fg("warning", " [models.dev reasoning_options]");
+					lines.push(th.fg("dim", `  ${this.pad("thinking", labelW)}`) + th.fg("text", thinking.text) + thinkingTag);
+				}
 				if (m.cost) {
 					const c = m.cost;
 					const parts = [`in:$${c.input}`, `out:$${c.output}`];

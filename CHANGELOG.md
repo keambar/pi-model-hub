@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-09-17
+
+### Added
+- Derive `thinkingLevelMap` from models.dev `reasoning_options` for models that declare no explicit map, so `xhigh` / `max` become selectable and levels the provider does not support are hidden instead of being sent verbatim.
+- `/hub` detail view shows a `thinking` row tagged `[user]` or `[models.dev reasoning_options]`.
+
+### Changed
+- Every `_`-prefixed `.json` file in `~/.pi/agent/sources/` is treated as extension metadata, not just the three reserved names.
+- Derived maps are adapted to the target API: Google models (`google-generative-ai`, `google-vertex`) ignore them because pi resolves Gemini's levels itself, and on `anthropic-messages` / `bedrock-converse-stream` a derived `minimal` is sent as `low`, which is the only value those APIs accept.
+
+### Fixed
+- `/hub`: `Space` toggles the selected provider again. It matched against a raw `" "` key id, which `matchesKey` never matches, so the toggle never fired.
+
+### Internal
+- `npm run check` type-checks (`tsc --noEmit`, strict + `noUncheckedIndexedAccess`) and runs the test suite.
+
 ## [0.1.3] — 2026-06-18
 
 ### Added
